@@ -1,0 +1,6 @@
+# .gitignore
+.env
+*.db
+__pycache__/
+uploads/
+.pytest_cache/
