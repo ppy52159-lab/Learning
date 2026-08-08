@@ -5,7 +5,9 @@ sqlmodel
 pydantic
 pydantic-settings
 python-jose[cryptography]
+PyJWT
 passlib[bcrypt]
+pwdlib[argon2]
 python-multipart
 pytest
 httpx
