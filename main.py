@@ -11,7 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlmodel import Session, select, col
-
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from database import init_db, get_session
 from models import User, UserCreate, UserRead, Task, TaskCreate, TaskRead
 from security import (
@@ -29,9 +31,11 @@ async def lifespan(app: FastAPI):
     yield
     # Code executed on shutdown (if needed):
     pass
-	
+limiter = Limiter(key_func=get_remote_address)	
 	
 app = FastAPI(title="Task Master API",lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ---------------------------------------------------------
 # 1. FILE SYSTEM & STATIC MOUNT
@@ -43,11 +47,17 @@ app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 # ---------------------------------------------------------
 # 2. CORS & TIMING MIDDLEWARE
 # ---------------------------------------------------------
+allowed_origins = [
+    "http://localhost:3000",             # Local Next.js/React frontend
+    "http://localhost:5173",             # Local Vite frontend
+    "https://learning-production-dea9.up.railway.app"    # Production domain
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -129,9 +139,11 @@ def signup(user_in: UserCreate, session: Session = Depends(get_session)):
     return db_user
 
 @app.post("/api/login")
-def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    session: Session = Depends(get_session)
+@limiter.limit("5/minute")
+async def login(
+	request: Request,
+	form_data: OAuth2PasswordRequestForm = Depends(),
+	session: Session = Depends(get_session)
 ):
     user = session.exec(select(User).where(User.username == form_data.username)).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
@@ -140,6 +152,10 @@ def login(
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+	
 # ---------------------------------------------------------
 # 6. PROFILE & FILE UPLOAD ROUTE
 # ---------------------------------------------------------
