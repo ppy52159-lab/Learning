@@ -13,3 +13,4 @@ pytest
 httpx
 alembic
 slowapi
+structlog
