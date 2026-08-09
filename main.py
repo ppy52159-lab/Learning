@@ -3,6 +3,7 @@ import jwt
 import time
 import shutil
 import uuid
+import structlog
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Request, UploadFile, File
@@ -32,7 +33,16 @@ async def lifespan(app: FastAPI):
     # Code executed on shutdown (if needed):
     pass
 limiter = Limiter(key_func=get_remote_address)	
-	
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer()  # Outputs JSON lines
+    ]
+)
+
+logger = structlog.get_logger()
 app = FastAPI(title="Task Master API",lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -76,6 +86,14 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = (
         "max-age=31536000; includeSubDomains"
+    )
+    logger.info(
+        "http_request",
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration_ms=process_time,
+        client_ip=request.client.host if request.client else "unknown"
     )
     return response
 
