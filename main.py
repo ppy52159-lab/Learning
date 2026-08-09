@@ -71,6 +71,12 @@ async def add_process_time_header(request: Request, call_next):
     process_time = (time.time() - start_time) * 1000
     print(f"LOG: {request.method} {request.url.path} - {process_time:.2f}ms")
     response.headers["X-Process-Time-MS"] = f"{process_time:.2f}"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
     return response
 
 # ---------------------------------------------------------
