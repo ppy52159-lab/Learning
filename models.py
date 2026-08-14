@@ -45,10 +45,11 @@ class Task(TaskBase, table=True):
     
     # 2. Foreign Key linking task to a user
     user_id: int = Field(foreign_key="user.id")
-
+    claimed_by: int | None = Field(default=None, foreign_key="user.id")
+    
     # 3. Relationship
     owner: User | None = Relationship(back_populates="tasks")
-
+    
     # 4. NEW FIELD ADDED FOR ALEMBIC
     priority: str = Field(default="medium")
 		

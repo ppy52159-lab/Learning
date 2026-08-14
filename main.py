@@ -4,6 +4,9 @@ import time
 import shutil
 import uuid
 import structlog
+import json
+import random
+import redis.asyncio as aioredis
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, status, Query, Request, UploadFile, File
@@ -23,15 +26,28 @@ from security import (
     create_access_token,
 )
 from config import settings
-
+from sqlalchemy.ext.asyncio import AsyncSession
+redis_client: aioredis.Redis|None=None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Code executed on startup:
-    init_db()
+    await init_db()
+    global redis_client
+    redis_client = aioredis.from_url(
+        "redis://localhost:6379", encoding="utf-8", decode_responses=True
+    )
+    print("connected to redis successfully")
+
     yield
+
     # Code executed on shutdown (if needed):
-    pass
+    await redis_client.close()
+    print("Redis connection closed.")
+
+	
+	
+
 limiter = Limiter(key_func=get_remote_address)	
 structlog.configure(
     processors=[
@@ -71,6 +87,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+BASE_TTL = 300  # 5 minutes base TTL
+
+
+def get_ttl_with_jitter(base_ttl: int = BASE_TTL) -> int:
+    """Adds random jitter (+/- 10%) to prevent Cache Avalanche."""
+    jitter = random.randint(-30, 30)
+    return max(10, base_ttl + jitter)
+    
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     start_time = time.time()
@@ -104,6 +128,8 @@ class TaskNotFoundException(Exception):
     def __init__(self, task_id: int):
         self.task_id = task_id
 
+
+	
 @app.exception_handler(TaskNotFoundException)
 def task_not_found_handler(request: Request, exc: TaskNotFoundException):
     return JSONResponse(
@@ -122,7 +148,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
 
 # Pass lifespan into the FastAPI app initialization
-def get_current_user(
+async def get_current_user(
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session)
 ) -> User:
@@ -143,12 +169,24 @@ def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+# Call this inside POST /api/tasks, PUT /api/tasks/{id}, and DELETE /api/tasks/{id}
+async def invalidate_user_tasks_cache(user_id: int):
+    if not redis_client:
+        return
 
+    # Find all keys matching this user's task cache pattern
+    pattern = f"tasks:user:{user_id}:*"
+    keys = await redis_client.keys(pattern)
+
+    if keys:
+        await redis_client.delete(*keys)
+        print(f"🧹 Cleared {len(keys)} cached task key(s) for User {user_id}")
+		
 # ---------------------------------------------------------
 # 5. AUTH ROUTES
 # ---------------------------------------------------------
 @app.post("/api/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-def signup(user_in: UserCreate, session: Session = Depends(get_session)):
+async def signup(user_in: UserCreate, session: Session = Depends(get_session)):
     existing = session.exec(select(User).where(User.username == user_in.username)).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -158,8 +196,8 @@ def signup(user_in: UserCreate, session: Session = Depends(get_session)):
         hashed_password=hash_password(user_in.password)
     )
     session.add(db_user)
-    session.commit()
-    session.refresh(db_user)
+    await session.commit()
+    await session.refresh(db_user)
     return db_user
 
 @app.post("/api/login")
@@ -186,7 +224,7 @@ async def health_check():
 ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"]
 
 @app.post("/api/users/avatar", response_model=UserRead)
-def upload_avatar(
+async def upload_avatar(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -210,8 +248,8 @@ def upload_avatar(
     # Save relative static path to the database
     current_user.avatar_url = f"/static/{unique_filename}"
     session.add(current_user)
-    session.commit()
-    session.refresh(current_user)
+    await session.commit()
+    await session.refresh(current_user)
 
     return current_user
 
@@ -219,7 +257,7 @@ def upload_avatar(
 # 7. TASK ROUTES (CRUD, PAGINATION, FILTERING)
 # ---------------------------------------------------------
 @app.post("/api/tasks", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
-def create_task(
+async def create_task(
     task_in: TaskCreate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -231,12 +269,13 @@ def create_task(
         user_id=current_user.id
     )
     session.add(db_task)
-    session.commit()
-    session.refresh(db_task)
+    await session.commit()
+    await session.refresh(db_task)
+    await invalidate_user_tasks_cache(current_user.id)
     return db_task
 
 @app.get("/api/tasks", response_model=list[TaskRead])
-def get_tasks(
+async def get_tasks(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     offset: int = Query(default=0, ge=0),
@@ -244,6 +283,16 @@ def get_tasks(
     search: str | None = None,
     sort_desc: bool = False
 ):
+    cache_key = f"tasks:user:{current_user.id}:off={offset}:lim={limit}:search={search}:desc={sort_desc}"
+
+    if redis_client:
+        cached_tasks = await redis_client.get(cache_key)
+        if cached_tasks:
+            print(f"⚡ Cache Hit for User {current_user.id}")
+            return json.loads(cached_tasks)
+
+    print(f"🐢 Cache Miss for User {current_user.id}. Querying Database...")
+
     statement = select(Task).where(Task.user_id == current_user.id)
 
     if search:
@@ -257,20 +306,74 @@ def get_tasks(
         statement = statement.order_by(col(Task.id).asc())
 
     statement = statement.offset(offset).limit(limit)
-    tasks = session.exec(statement).all()
-    return tasks
+    results = await session.exec(statement)
+    tasks =results.all()
+    tasks_data = [task.model_dump() for task in tasks]
+
+    # 4. SAVE RESULT IN REDIS (Expire in 60 seconds)
+    if redis_client:
+        await redis_client.setex(
+            cache_key,
+            60,  # TTL: 60 seconds
+            json.dumps(tasks_data, default=str),  # default=str handles dates/UUIDs
+        )
+
+    return tasks_data
 
 @app.get("/api/tasks/{task_id}", response_model=TaskRead)
-def get_task_by_id(
+async def get_task_by_id(
     task_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
+    cache_key=f"tasks:user:{current_user.id}:id:{task_id}"
+    if redis_client:
+        cache_data=await redis_client.get(cache_key)
+        if cache_data is not None:
+            if cache_data=="null":
+                raise TaskNotFoundException(task_id=task_id)
+            print(f'Cache hit for task{task_id}')
+            return json.loads(cache_data)
+    print(f"🐢 Cache Miss for Task {task_id}. Querying Database...")
     task = session.get(Task, task_id)
     if not task or task.user_id != current_user.id:
+        if redis_client :
+            await redis_client.setex(cache_key,60,"null")
         raise TaskNotFoundException(task_id=task_id)
-    return task
-
+    ttl = get_ttl_with_jitter(BASE_TTL)
+    task_data=task.model_dump()
+    if redis_client:
+        await redis_client.setex(
+            cache_key, ttl, json.dumps(task_data, default=str)
+        )
+    return task_data
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
-	
+@app.post("/api/tasks/{task_id}/claim")
+async def claim_task(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session)
+):
+    statement = (
+        select(Task)
+        .where(Task.id == task_id)
+        .with_for_update()
+    )
+
+    result = await session.exec(statement)
+    task = result.first()
+
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.claimed_by is not None:
+        raise HTTPException(status_code=400, detail="Task already claimed")
+
+    task.claimed_by = current_user.id
+
+    await session.commit()
+
+    return {"message": "Task claimed successfully"}
+    	
