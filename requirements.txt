@@ -15,6 +15,5 @@ alembic
 slowapi
 structlog
 redis
-json
 slowapi
 aiosqlite
