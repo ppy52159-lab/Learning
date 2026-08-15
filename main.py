@@ -186,8 +186,9 @@ async def invalidate_user_tasks_cache(user_id: int):
 # 5. AUTH ROUTES
 # ---------------------------------------------------------
 @app.post("/api/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-async def signup(user_in: UserCreate, session: Session = Depends(get_session)):
-    existing = session.exec(select(User).where(User.username == user_in.username)).first()
+async def signup(user_in: UserCreate, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(select(User).where(User.username == user_in.username)).first()
+    existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
 
