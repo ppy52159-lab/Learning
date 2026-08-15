@@ -1,43 +1,50 @@
 import pytest
+import io
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, create_engine, Session
-from sqlmodel.pool import StaticPool
+from sqlmodel import SQLModel
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from main import app
 from database import get_session
-import io
 
-
-# =========================================================
-# 1. SETUP IN-MEMORY TEST DATABASE & TEST CLIENT
-# =========================================================
-
-# Use in-memory SQLite with StaticPool so all connections share the same memory DB
-DATABASE_URL = "sqlite:///:memory:"
-engine = create_engine(
-    DATABASE_URL, 
-    connect_args={"check_same_thread": False}, 
-    poolclass=StaticPool
+# Use in-memory async SQLite with StaticPool
+DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+async_engine = create_async_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
 )
 
-# Test session generator
-def get_session_override():
-    with Session(engine) as session:
+TestingSessionLocal = sessionmaker(
+    async_engine, class_=AsyncSession, expire_on_commit=False
+)
+
+async def get_session_override():
+    async with TestingSessionLocal() as session:
         yield session
 
-# Override the main app's get_session dependency
 app.dependency_overrides[get_session] = get_session_override
 
-# Create the TestClient
 client = TestClient(app)
 
 
-# Pytest fixture to reset tables before every test
 @pytest.fixture(autouse=True)
 def prepare_database():
-    SQLModel.metadata.create_all(engine)
+    import asyncio
+    async def _init():
+        async with async_engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+    async def _drop():
+        async with async_engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.drop_all)
+    asyncio.run(_init())
     yield
-    SQLModel.metadata.drop_all(engine)
+    asyncio.run(_drop())
+
+
 
 
 # =========================================================

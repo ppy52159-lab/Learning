@@ -19,7 +19,10 @@ class User(UserBase, table=True):
     hashed_password: str
     avatar_url: str | None = Field(default=None)
 
-    tasks: list["Task"] = Relationship(back_populates="owner")
+    tasks: list["Task"] = Relationship(
+        back_populates="owner",
+        sa_relationship_kwargs={"foreign_keys": "[Task.user_id]"}
+    )
 
 
 # =========================================================
@@ -30,26 +33,32 @@ class TaskBase(SQLModel):
     title: str
     description: str
     is_completed: bool = False
-	
-	
+
+
 class TaskCreate(TaskBase):
     pass
 
 class TaskRead(TaskBase):
     id: int
     user_id: int
+    claimed_by: int | None = None
+    priority: str = "medium"
 
 class Task(TaskBase, table=True):
-    # 1. Primary Key (THIS WAS MISSING OR OVERWRITTEN!)
+    # 1. Primary Key
     id: int | None = Field(default=None, primary_key=True)
     
-    # 2. Foreign Key linking task to a user
+    # 2. Foreign Keys linking task to users
     user_id: int = Field(foreign_key="user.id")
     claimed_by: int | None = Field(default=None, foreign_key="user.id")
     
     # 3. Relationship
-    owner: User | None = Relationship(back_populates="tasks")
+    owner: User | None = Relationship(
+        back_populates="tasks",
+        sa_relationship_kwargs={"foreign_keys": "[Task.user_id]"}
+    )
     
-    # 4. NEW FIELD ADDED FOR ALEMBIC
+    # 4. Field for Alembic migration
     priority: str = Field(default="medium")
+
 		

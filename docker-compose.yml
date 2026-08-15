@@ -7,11 +7,22 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./task_master.db:/app/task_master.db  # Persists your SQLite database
       - ./uploads:/app/uploads                # Persists uploaded files
     expose:
       - "8000"
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    container_name: redis_cache
+    restart: always
+    ports:
+      - "6379:6379"
 
   nginx:
     image: nginx:alpine
@@ -23,4 +34,5 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - web
+
  
