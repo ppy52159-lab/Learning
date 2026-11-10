@@ -13,4 +13,3 @@ class Settings(BaseSettings):
 
 # This reads the .env file automatically!
 settings = Settings()
-
